@@ -145,8 +145,6 @@ func updateHelmRepos() {
 }
 
 func GetAvailableCharts() []ChartMeta {
-	// Pour l'instant, retourne juste notre liste configurée.
-	// À terme, pourrait faire un `helm search repo <keyword>` ou interroger une DB.
 	return configuredCharts
 }
 
@@ -169,28 +167,33 @@ func InstallChart(chartName string, releaseName string, values map[string]interf
 	}
 
 	if releaseName == "" {
-		releaseName = cfgChart.Name // Par défaut, utiliser le nom du chart pour la release
+		releaseName = cfgChart.Name
 	}
 
-	// Vérifier si la release existe déjà (dans appInstallNS via actionConfig)
 	histClient := action.NewHistory(actionConfig)
 	histClient.Max = 1
-	if _, err := histClient.Run(releaseName); err == nil {
+	// S'assurer que l'historique est vérifié pour le bon namespace (celui de actionConfig)
+	log.Printf("getting history for release %s in namespace %s", releaseName, appInstallNS) // Ajout de log
+	history, errHist := histClient.Run(releaseName)
+	if errHist == nil && len(history) > 0 { // Vérifie si l'erreur est nil ET si l'historique n'est pas vide
 		return nil, fmt.Errorf("release %s already exists in namespace %s", releaseName, appInstallNS)
+	} else if errHist != nil && !strings.Contains(errHist.Error(), "release: not found") {
+		// S'il y a une autre erreur que "not found", la retourner
+		return nil, fmt.Errorf("error checking history for release %s: %w", releaseName, errHist)
 	}
+	// Si errHist indique "release: not found" ou si l'historique est vide, on peut continuer.
 
 	client := action.NewInstall(actionConfig)
-	client.Namespace = appInstallNS // Explicitement pour l'installation
+	client.Namespace = appInstallNS
 	client.ReleaseName = releaseName
-	client.Version = cfgChart.Version // Utiliser la version spécifiée dans ChartMeta
-	client.Wait = true                // Attendre que les ressources soient prêtes (optionnel)
-	client.Timeout = 5 * time.Minute  // Timeout pour l'installation
+	client.Version = cfgChart.Version
+	client.Wait = true
+	client.Timeout = 5 * time.Minute
 
 	log.Printf("Locating chart %s version %s...", cfgChart.Chart, client.Version)
 	cp, err := client.ChartPathOptions.LocateChart(cfgChart.Chart, settings)
 	if err != nil {
 		log.Printf("Error locating chart %s (version %s): %v. Attempting repo update.", cfgChart.Chart, client.Version, err)
-		// Tenter une mise à jour des dépôts et réessayer si le chart n'est pas trouvé
 		updateHelmRepos()
 		cp, err = client.ChartPathOptions.LocateChart(cfgChart.Chart, settings)
 		if err != nil {
@@ -218,16 +221,17 @@ func ListInstalledReleases() ([]ReleaseInfo, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	client := action.NewList(actionConfig) // actionConfig est maintenant initialisé pour appInstallNS
-	client.AllNamespaces = false           // Lister uniquement dans appInstallNS (défini dans actionConfig)
-	client.SetStateMask()                  // Lister tous les états (deployed, failed, etc.)
+	client := action.NewList(actionConfig)
+	client.AllNamespaces = false
+	client.SetStateMask()
 
 	results, err := client.Run()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list releases: %w", err)
 	}
 
-	var releases []ReleaseInfo
+	releases := []ReleaseInfo{}
+
 	for _, rel := range results {
 		releases = append(releases, ReleaseInfo{
 			Name:       rel.Name,
@@ -246,14 +250,12 @@ func UninstallRelease(releaseName string) (*release.UninstallReleaseResponse, er
 	mu.Lock()
 	defer mu.Unlock()
 
-	// actionConfig est initialisé pour appInstallNS, donc Uninstall opérera dans ce namespace.
 	client := action.NewUninstall(actionConfig)
 	client.Timeout = 5 * time.Minute
 
 	log.Printf("Uninstalling release %s from namespace %s", releaseName, appInstallNS)
 	res, err := client.Run(releaseName)
 	if err != nil {
-		// Vérifier si la release n'existe pas
 		if strings.Contains(err.Error(), "release: not found") {
 			return nil, fmt.Errorf("release %s not found in namespace %s", releaseName, appInstallNS)
 		}
@@ -263,8 +265,6 @@ func UninstallRelease(releaseName string) (*release.UninstallReleaseResponse, er
 	return res, nil
 }
 
-// GetReleaseStatus utilise `helm status` via os/exec car c'est plus simple pour obtenir un JSON complet.
-// La librairie Go de Helm est un peu verbeuse pour cette opération.
 func GetReleaseStatus(releaseName string) (map[string]interface{}, error) {
 	mu.Lock()
 	defer mu.Unlock()
