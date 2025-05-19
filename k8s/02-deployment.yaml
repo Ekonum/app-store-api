@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-store-api-deployment
+  namespace: app-store-api
+  labels:
+    app: app-store-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: app-store-api
+  template:
+    metadata:
+      labels:
+        app: app-store-api
+    spec:
+      serviceAccountName: app-store-api-sa # Utiliser le ServiceAccount créé
+      containers:
+        - name: app-store-api
+          image: app-store-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GIN_MODE
+              value: "debug"

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app-store-api
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app-store-apps

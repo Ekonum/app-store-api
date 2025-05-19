@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-store-api-service
+  namespace: app-store-api
+spec:
+  type: NodePort # Pour un accès facile sur k3s en VM. Pourrait être ClusterIP + Ingress.
+  selector:
+    app: app-store-api
+  ports:
+    - port: 80 # Port du service dans le cluster
+      targetPort: 8080 # Port du container
+      nodePort: 30080 # Port exposé sur le noeud k3s (VM)
