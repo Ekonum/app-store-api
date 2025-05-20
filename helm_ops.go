@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"k8s.io/client-go/tools/clientcmd"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +20,10 @@ import (
 	"helm.sh/helm/v3/pkg/release"
 
 	// Nécessaire pour que client-go puisse s'authentifier auprès de k8s
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/rest"
 )
 
 var (
@@ -26,6 +32,7 @@ var (
 	appInstallNS     = "app-store-apps" // Namespace où les apps seront installées
 	configuredCharts []ChartMeta        // Notre "base de données" de charts
 	mu               sync.Mutex
+	clientset        kubernetes.Interface
 )
 
 // ChartMeta définit la structure pour nos charts disponibles
@@ -39,13 +46,14 @@ type ChartMeta struct {
 
 // ReleaseInfo définit les informations sur une release Helm installée
 type ReleaseInfo struct {
-	Name       string `json:"name"`
-	Namespace  string `json:"namespace"`
-	Version    int    `json:"version"`
-	Updated    string `json:"updated"`
-	Status     string `json:"status"`
-	Chart      string `json:"chart"`
-	AppVersion string `json:"app_version"`
+	Name       string           `json:"name"`
+	Namespace  string           `json:"namespace"`
+	Version    int              `json:"version"`
+	Updated    string           `json:"updated"`
+	Status     string           `json:"status"`
+	Chart      string           `json:"chart"`
+	AppVersion string           `json:"app_version"`
+	NodePorts  map[string]int32 `json:"node_ports,omitempty"`
 }
 
 func InitHelm() {
@@ -58,6 +66,27 @@ func InitHelm() {
 		log.Fatalf("Failed to initialize Helm action config for namespace %s: %v", appInstallNS, err)
 	}
 	log.Printf("Helm initialized successfully for namespace: %s.", appInstallNS)
+
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		// Fallback to kubeconfig if not in cluster (pour dev local de l'API hors cluster)
+		log.Printf("Not in cluster, attempting to use kubeconfig: %v", err)
+		kubeconfigPath := settings.KubeConfig
+		if kubeconfigPath == "" {
+			// Tenter de trouver le kubeconfig dans le répertoire par défaut
+			homeDir, _ := os.UserHomeDir()
+			kubeconfigPath = filepath.Join(homeDir, ".kube", "config")
+		}
+		config, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+		if err != nil {
+			log.Fatalf("Failed to get Kubernetes config: %v", err)
+		}
+	}
+	clientset, err = kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Failed to create Kubernetes clientset: %v", err)
+	}
+	log.Println("Kubernetes clientset initialized successfully.")
 
 	// Créer le namespace pour les applications s'il n'existe pas
 	// On utilise kubectl car c'est plus simple pour une opération ponctuelle
@@ -145,6 +174,8 @@ func updateHelmRepos() {
 }
 
 func GetAvailableCharts() []ChartMeta {
+	// Pour l'instant, retourne juste notre liste configurée.
+	// À terme, pourrait faire un `helm search repo <keyword>` ou interroger une DB.
 	return configuredCharts
 }
 
@@ -167,33 +198,32 @@ func InstallChart(chartName string, releaseName string, values map[string]interf
 	}
 
 	if releaseName == "" {
-		releaseName = cfgChart.Name
+		releaseName = cfgChart.Name // Par défaut, utiliser le nom du chart pour la release
 	}
 
+	// Vérifier si la release existe déjà (dans appInstallNS via actionConfig)
 	histClient := action.NewHistory(actionConfig)
 	histClient.Max = 1
-	// S'assurer que l'historique est vérifié pour le bon namespace (celui de actionConfig)
-	log.Printf("getting history for release %s in namespace %s", releaseName, appInstallNS) // Ajout de log
+	log.Printf("getting history for release %s in namespace %s", releaseName, appInstallNS)
 	history, errHist := histClient.Run(releaseName)
-	if errHist == nil && len(history) > 0 { // Vérifie si l'erreur est nil ET si l'historique n'est pas vide
+	if errHist == nil && len(history) > 0 {
 		return nil, fmt.Errorf("release %s already exists in namespace %s", releaseName, appInstallNS)
 	} else if errHist != nil && !strings.Contains(errHist.Error(), "release: not found") {
-		// S'il y a une autre erreur que "not found", la retourner
 		return nil, fmt.Errorf("error checking history for release %s: %w", releaseName, errHist)
 	}
-	// Si errHist indique "release: not found" ou si l'historique est vide, on peut continuer.
 
 	client := action.NewInstall(actionConfig)
-	client.Namespace = appInstallNS
+	client.Namespace = appInstallNS // Explicitement pour l'installation
 	client.ReleaseName = releaseName
-	client.Version = cfgChart.Version
-	client.Wait = true
-	client.Timeout = 5 * time.Minute
+	client.Version = cfgChart.Version // Utiliser la version spécifiée dans ChartMeta
+	client.Wait = true                // Attendre que les ressources soient prêtes (optionnel)
+	client.Timeout = 5 * time.Minute  // Timeout pour l'installation
 
 	log.Printf("Locating chart %s version %s...", cfgChart.Chart, client.Version)
 	cp, err := client.ChartPathOptions.LocateChart(cfgChart.Chart, settings)
 	if err != nil {
 		log.Printf("Error locating chart %s (version %s): %v. Attempting repo update.", cfgChart.Chart, client.Version, err)
+		// Tenter une mise à jour des dépôts et réessayer si le chart n'est pas trouvé
 		updateHelmRepos()
 		cp, err = client.ChartPathOptions.LocateChart(cfgChart.Chart, settings)
 		if err != nil {
@@ -221,18 +251,55 @@ func ListInstalledReleases() ([]ReleaseInfo, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	client := action.NewList(actionConfig)
-	client.AllNamespaces = false
-	client.SetStateMask()
+	client := action.NewList(actionConfig) // actionConfig est maintenant initialisé pour appInstallNS
+	client.AllNamespaces = false           // Lister uniquement dans appInstallNS (défini dans actionConfig)
+	client.SetStateMask()                  // Lister tous les états (deployed, failed, etc.)
 
 	results, err := client.Run()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list releases: %w", err)
 	}
 
-	releases := []ReleaseInfo{}
-
+	var releases []ReleaseInfo
 	for _, rel := range results {
+		nodePorts := make(map[string]int32)
+
+		// Récupérer les services associés à cette release
+		// On suppose que les services ont un label "app.kubernetes.io/instance": "<release-name>"
+		// C'est une convention Helm commune.
+		labelSelector := fmt.Sprintf("app.kubernetes.io/instance=%s", rel.Name)
+		serviceList, err := clientset.CoreV1().Services(appInstallNS).List(context.TODO(), metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			log.Printf("Warning: Could not list services for release %s: %v", rel.Name, err)
+		} else {
+			for _, service := range serviceList.Items {
+				// On ne s'intéresse qu'aux services de type NodePort ou LoadBalancer
+				// (K3s rend les LoadBalancer accessibles via NodePort)
+				if service.Spec.Type == "NodePort" || service.Spec.Type == "LoadBalancer" {
+					for _, port := range service.Spec.Ports {
+						if port.NodePort > 0 {
+							portName := port.Name
+							if portName == "" { // Si le nom du port n'est pas défini, utiliser le numéro de port
+								portName = fmt.Sprintf("%d", port.Port)
+							}
+							// S'il y a plusieurs services pour une release, cela pourrait écraser les ports
+							// Pour l'instant, on prend tous les nodeports trouvés.
+							// On pourrait préfixer par le nom du service si nécessaire: service.Name + "-" + portName
+							nodePorts[portName] = port.NodePort
+						}
+					}
+					// Souvent, un seul service principal est exposé.
+					// Si plusieurs services, il faudra une logique plus fine pour choisir le bon.
+					// Pour l'instant, on prend les ports du premier service de type NodePort/LoadBalancer trouvé.
+					if len(nodePorts) > 0 {
+						break // Sortir de la boucle des services une fois qu'on a des nodePorts
+					}
+				}
+			}
+		}
+
 		releases = append(releases, ReleaseInfo{
 			Name:       rel.Name,
 			Namespace:  rel.Namespace,
@@ -241,6 +308,7 @@ func ListInstalledReleases() ([]ReleaseInfo, error) {
 			Status:     rel.Info.Status.String(),
 			Chart:      rel.Chart.Metadata.Name,
 			AppVersion: rel.Chart.Metadata.AppVersion,
+			NodePorts:  nodePorts, // Le champ est rempli ici
 		})
 	}
 	return releases, nil
@@ -250,12 +318,14 @@ func UninstallRelease(releaseName string) (*release.UninstallReleaseResponse, er
 	mu.Lock()
 	defer mu.Unlock()
 
+	// actionConfig est initialisé pour appInstallNS, donc Uninstall opérera dans ce namespace.
 	client := action.NewUninstall(actionConfig)
 	client.Timeout = 5 * time.Minute
 
 	log.Printf("Uninstalling release %s from namespace %s", releaseName, appInstallNS)
 	res, err := client.Run(releaseName)
 	if err != nil {
+		// Vérifier si la release n'existe pas
 		if strings.Contains(err.Error(), "release: not found") {
 			return nil, fmt.Errorf("release %s not found in namespace %s", releaseName, appInstallNS)
 		}
@@ -265,6 +335,8 @@ func UninstallRelease(releaseName string) (*release.UninstallReleaseResponse, er
 	return res, nil
 }
 
+// GetReleaseStatus utilise `helm status` via os/exec car c'est plus simple pour obtenir un JSON complet.
+// La librairie Go de Helm est un peu verbeuse pour cette opération.
 func GetReleaseStatus(releaseName string) (map[string]interface{}, error) {
 	mu.Lock()
 	defer mu.Unlock()
