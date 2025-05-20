@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: app-store-api-deployment
-  namespace: app-store-api
+  namespace: app-store-api # API's own namespace
   labels:
     app: app-store-api
 spec:
@@ -15,13 +15,54 @@ spec:
       labels:
         app: app-store-api
     spec:
-      serviceAccountName: app-store-api-sa # Utiliser le ServiceAccount créé
+      serviceAccountName: app-store-api-sa
       containers:
         - name: app-store-api
-          image: app-store-api:latest
-          imagePullPolicy: IfNotPresent
+          image: app-store-api:latest # Image name, ensure it's available in K3s node cache or a registry
+          imagePullPolicy: IfNotPresent # Use a local image if present, otherwise try to pull
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080 # Should match APP_PORT
           env:
+            - name: APP_PORT
+              value: "8080"
             - name: GIN_MODE
-              value: "debug"
+              value: "release" # "debug" or "release"
+            - name: APP_INSTALL_NAMESPACE
+              value: "app-store-apps" # Namespace where apps will be installed
+            - name: CHART_CONFIG_PATH
+              value: "/app/charts.yaml" # Path inside the container
+            # KUBECONFIG is managed by the service account
+            # HELM_DRIVER defaults to "secret" in config.go
+          # Liveness and Readiness probes are highly recommended for production
+          livenessProbe:
+            httpGet:
+              path: /health # Assuming a /health endpoint in your API
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Consider resource requests and limits for production
+          # resources:
+          #   requests:
+          #     cpu: "100m"
+          #     memory: "128Mi"
+          #   limits:
+          #     cpu: "500m"
+          #     memory: "256Mi"
+        # To use an external charts.yaml via ConfigMap (recommended over baking into image):
+        # 1. Create a ConfigMap: kubectl create configmap chart-config --from-file=charts.yaml -n app-store-api
+        # 2. Mount it as a volume and update CHART_CONFIG_PATH env var.
+        #   volumeMounts:
+        #   - name: chart-config-volume
+        #     mountPath: /etc/appstore/config
+        # volumes:
+        # - name: chart-config-volume
+        #   configMap:
+        #     name: chart-config
+        # Then set CHART_CONFIG_PATH to "/etc/appstore/config/charts.yaml"

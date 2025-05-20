@@ -1,0 +1,21 @@
+charts:
+  - name: "nginx"
+    chart: "bitnami/nginx"
+    version: "15.14.0" # Pin version for stability
+    repo_url: "https://charts.bitnami.com/bitnami"
+    description: "A popular web server and reverse proxy."
+  - name: "redis"
+    chart: "bitnami/redis"
+    version: "18.10.1"
+    repo_url: "https://charts.bitnami.com/bitnami"
+    description: "In-memory data structure store."
+  - name: "wordpress"
+    chart: "bitnami/wordpress"
+    version: "20.2.1"
+    repo_url: "https://charts.bitnami.com/bitnami"
+    description: "The world's most popular blogging platform."
+    # Example of default values that could be applied if not overridden by user
+    # default_values:
+    #   service:
+    #     type: NodePort
+    #   wordpressUsername: admin
