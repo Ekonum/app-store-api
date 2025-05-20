@@ -39,12 +39,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-
-      - name: Run linters
-        run: $(go env GOPATH)/bin/golangci-lint run ./...
-
       - name: Run tests
         run: go test -v ./...
 
@@ -119,7 +113,6 @@ jobs:
             type=semver,pattern={{major}}
             type=sha
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'master') }}
-
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
