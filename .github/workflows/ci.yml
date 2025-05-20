@@ -1,0 +1,133 @@
+name: App Store API CI
+
+on:
+  push:
+    branches:
+      - master
+      - develop
+      - 'feature/**'
+  pull_request:
+    branches:
+      - master
+      - develop
+
+permissions:
+  contents: write # Needed for semantic-release to create releases and commit CHANGELOG.md
+  packages: write # Needed to publish Docker image to GHCR
+  issues: write   # Needed for semantic-release to comment on issues/PRs
+
+jobs:
+  lint-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+      - name: Run linters
+        run: $(go env GOPATH)/bin/golangci-lint run ./...
+
+      - name: Run tests
+        run: go test -v ./...
+
+  release-and-build:
+    name: Release & Build Docker Image
+    needs: lint-test # Run only if lint-test passes
+    runs-on: ubuntu-latest
+    # Only run on the master branch after pushes (not PRs)
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Need to fetch all history for semantic-release to analyze commits
+          fetch-depth: 0
+          # Persist credentials for semantic-release to push tags/commits
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # LTS version
+
+      - name: Install semantic-release and plugins
+        run: npm ci --ignore-scripts # Use npm ci for faster, deterministic installs
+
+      - name: Run semantic-release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Provided by GitHub Actions
+          # For semantic-release to push to repo if it modifies go.mod/go.sum (if you version them)
+          # you might need a Personal Access Token (PAT) with repo write scope.
+          # For now, GITHUB_TOKEN is usually fine for creating releases/tags.
+
+      # The rest of the steps run if semantic-release created a new version (i.e., a new tag)
+      # semantic-release creates a git tag like v1.2.3. We use this tag.
+      # The condition checks if a tag was pushed as part of the semantic-release step
+      # A bit tricky to check directly in GitHub Actions if semantic-release *did* release.
+      # A common pattern is to let semantic-release create the tag, and have another workflow
+      # trigger on tag creation to build and publish.
+      # For simplicity here, we'll assume if semantic-release runs on master, we try to build.
+      # A more robust check could involve checking if env.SEMANTIC_RELEASE_RELEASED was set.
+
+      - name: Set up QEMU (for multi-platform builds, optional)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }} # GITHUB_TOKEN can push to GHCR
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/app-store-api
+          # Tags:
+          # - type=semver,pattern={{version}} (when a Git tag like v1.2.3 is pushed)
+          # - type=sha,prefix= (for commit SHA)
+          # - 'latest' for default branch
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'master') }}
+
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile # Path to your API's Dockerfile
+          push: ${{ github.event_name != 'pull_request' }} # Push only if not a PR
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
