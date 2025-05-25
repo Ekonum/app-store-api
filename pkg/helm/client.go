@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log" // Consider replacing with a structured logger in a real app
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -14,24 +15,22 @@ import (
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
-	"helm.sh/helm/v3/pkg/getter"
 	"helm.sh/helm/v3/pkg/release"
-	"helm.sh/helm/v3/pkg/repo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/cli-runtime/pkg/genericclioptions" // Needed for ConfigFlags
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	// "app-store-api/pkg/appcatalog" // REMOVED THIS IMPORT
 	"app-store-api/pkg/config"
 )
 
 // HelmClient interacts with Helm and Kubernetes.
 type HelmClient struct {
 	config       *config.AppConfig
-	settings     *cli.EnvSettings
+	settings     *cli.EnvSettings // Still useful for RepositoryCache, etc.
 	actionConfig *action.Configuration
 	kubeClient   kubernetes.Interface
 	repoUpdateMu sync.Mutex
@@ -39,55 +38,85 @@ type HelmClient struct {
 
 // NewHelmClient creates a new HelmClient.
 func NewHelmClient(cfg *config.AppConfig) (*HelmClient, error) {
-	settings := cli.New()
-	settings.KubeConfig = cfg.KubeconfigPath
-	settings.SetNamespace(cfg.AppInstallNamespace)
+	settings := cli.New() // Keep settings for non-REST client specific configs like cache paths
+	// Note: settings.Namespace() will be the namespace from the current kubeconfig context or "default"
+	// We will override this for Helm operations to use cfg.AppInstallNamespace.
 
 	actionCfg := new(action.Configuration)
-	err := actionCfg.Init(settings.RESTClientGetter(), cfg.AppInstallNamespace, cfg.HelmDriver, log.Printf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize Helm action configuration for namespace %s: %w", cfg.AppInstallNamespace, err)
-	}
+	var k8sConfig *rest.Config // This will be used for the direct Kubernetes client
+	var err error
 
-	var k8sConfig *rest.Config
-	k8sConfig, err = rest.InClusterConfig()
-	if err != nil {
-		log.Printf("Not in cluster, attempting to use kubeconfig from %s: %v", settings.KubeConfig, err)
-		k8sConfig, err = clientcmd.BuildConfigFromFlags("", settings.KubeConfig)
+	// Setup ConfigFlags for Helm's RESTClientGetter
+	// These flags will determine how Helm connects to Kubernetes.
+	// The namespace in ConfigFlags is the default namespace for operations if not overridden.
+	// For Helm, the namespace for release metadata storage is cfg.AppInstallNamespace.
+	configFlags := genericclioptions.NewConfigFlags(true).WithDeprecatedPasswordFlag()
+	configFlags.Namespace = &cfg.AppInstallNamespace // Helm operations default to this namespace
+
+	// Determine if running in-cluster or using a kubeconfig file
+	inCluster := os.Getenv("KUBERNETES_SERVICE_HOST") != "" && os.Getenv("KUBERNETES_SERVICE_PORT") != ""
+
+	if inCluster {
+		log.Println("Detected in-cluster environment. Using in-cluster config for Helm and Kubernetes clients.")
+		// For in-cluster, KubeConfigPath should be empty for ConfigFlags to use service account
+		// BearerToken and CAFile might be auto-populated or can be set from service account paths if needed.
+		// ConfigFlags defaults to in-cluster if KubeConfig is not set.
+		k8sConfig, err = rest.InClusterConfig()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get Kubernetes config: %w", err)
+			return nil, fmt.Errorf("failed to get in-cluster Kubernetes config for kubeClient: %w", err)
+		}
+	} else {
+		log.Printf("Not an in-cluster environment. Using kubeconfig from: %s", cfg.KubeconfigPath)
+		if cfg.KubeconfigPath == "" {
+			return nil, fmt.Errorf("kubeconfig path is not set for out-of-cluster configuration")
+		}
+		configFlags.KubeConfig = &cfg.KubeconfigPath // Point to the kubeconfig file
+		// The namespace in configFlags will be used as the default if not overridden per operation
+		// For Helm actions, we explicitly set the namespace (cfg.AppInstallNamespace) where needed.
+
+		k8sConfig, err = clientcmd.BuildConfigFromFlags("", cfg.KubeconfigPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get Kubernetes config from file %s for kubeClient: %w", cfg.KubeconfigPath, err)
 		}
 	}
+
+	// Initialize Helm action configuration using the ConfigFlags as the RESTClientGetter
+	// The namespace passed to Init (second arg) is where Helm stores release metadata.
+	err = actionCfg.Init(configFlags, cfg.AppInstallNamespace, cfg.HelmDriver, log.Printf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Helm action configuration: %w", err)
+	}
+
+	// Initialize direct Kubernetes client
 	kubeClient, err := kubernetes.NewForConfig(k8sConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
+	// Apply the actual KubeConfig path to cli.EnvSettings for operations like `helm repo` that might use it
+	settings.KubeConfig = cfg.KubeconfigPath
+	settings.SetNamespace(cfg.AppInstallNamespace) // Ensure settings reflect the target namespace for CLI tools if used
+
 	hc := &HelmClient{
 		config:       cfg,
-		settings:     settings,
+		settings:     settings, // Retain settings for other uses like RepositoryCache
 		actionConfig: actionCfg,
 		kubeClient:   kubeClient,
 	}
 
-	if _, err := hc.kubeClient.CoreV1().Namespaces().Get(context.Background(), cfg.AppInstallNamespace, metav1.GetOptions{}); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			log.Printf("Namespace %s not found, attempting to create it using kubectl.", cfg.AppInstallNamespace)
-			cmd := exec.Command("kubectl", "create", "namespace", cfg.AppInstallNamespace)
-			if output, errCreate := cmd.CombinedOutput(); errCreate != nil {
-				log.Printf("Failed to create namespace %s: %v. Output: %s. Please ensure it exists.", cfg.AppInstallNamespace, errCreate, string(output))
-			} else {
-				log.Printf("Namespace %s created successfully.", cfg.AppInstallNamespace)
-			}
+	if _, errNs := hc.kubeClient.CoreV1().Namespaces().Get(context.Background(), cfg.AppInstallNamespace, metav1.GetOptions{}); errNs != nil {
+		if strings.Contains(errNs.Error(), "not found") {
+			log.Printf("Target application namespace %s not found. The application will attempt to install charts there.", cfg.AppInstallNamespace)
 		} else {
-			log.Printf("Error checking namespace %s: %v", cfg.AppInstallNamespace, err)
+			log.Printf("Error checking namespace %s: %v", cfg.AppInstallNamespace, errNs)
 		}
 	}
+
 	return hc, nil
 }
 
 // UpdateRepos adds and updates Helm repositories based on the provided chart definitions.
-func (hc *HelmClient) UpdateRepos(charts []ChartDefinition) error { // MODIFIED PARAMETER TYPE
+func (hc *HelmClient) UpdateRepos(charts []ChartDefinition) error {
 	hc.repoUpdateMu.Lock()
 	defer hc.repoUpdateMu.Unlock()
 
@@ -107,40 +136,47 @@ func (hc *HelmClient) UpdateRepos(charts []ChartDefinition) error { // MODIFIED 
 		}
 
 		log.Printf("Ensuring Helm repo: %s %s", repoName, chart.RepoURL)
-		entry := &repo.Entry{Name: repoName, URL: chart.RepoURL}
-
-		r, err := repo.NewChartRepository(entry, getter.All(hc.settings))
-		if err != nil {
-			return fmt.Errorf("failed to create chart repository for %s: %w", repoName, err)
-		}
-		r.CachePath = hc.settings.RepositoryCache
-
-		if _, err := r.DownloadIndexFile(); err != nil {
-			log.Printf("Warning: failed to download index for repo %s (%s): %v. Will try to add anyway.", repoName, chart.RepoURL, err)
-		}
-
+		// For `helm repo add/update`, it's often more reliable to shell out to the Helm CLI
+		// as it handles more edge cases and auth.
+		// Ensure KUBECONFIG and HELM_NAMESPACE are set if necessary.
 		cmd := exec.Command("helm", "repo", "add", repoName, chart.RepoURL, "--force-update")
+		cmd.Env = os.Environ()            // Pass current environment
+		if hc.settings.KubeConfig != "" { // Propagate KubeConfig if specified
+			cmd.Env = append(cmd.Env, "KUBECONFIG="+hc.settings.KubeConfig)
+		}
+		// Helm CLI commands often respect HELM_NAMESPACE for where to look for some config,
+		// though repo commands are usually global or use specific config files.
+		// cmd.Env = append(cmd.Env, "HELM_NAMESPACE="+hc.config.AppInstallNamespace)
+
 		if output, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("Error adding/updating repo %s: %v\nOutput: %s", repoName, err, string(output))
+			log.Printf("Error adding/updating repo %s with Helm CLI: %v\nOutput: %s", repoName, err, string(output))
 		} else {
-			log.Printf("Repo %s added/updated successfully.", repoName)
+			log.Printf("Repo %s added/updated successfully via Helm CLI.", repoName)
 			addedRepos[repoName] = true
 		}
 	}
 
-	log.Println("Updating all Helm repositories...")
-	cmd := exec.Command("helm", "repo", "update")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("Warning: Error updating Helm repositories: %v\nOutput: %s", err, string(output))
-		return fmt.Errorf("helm repo update failed: %w; output: %s", err, string(output))
+	if len(addedRepos) > 0 { // Only update if repos were actually added/changed by this call.
+		log.Println("Updating all Helm repositories via Helm CLI...")
+		cmd := exec.Command("helm", "repo", "update")
+		cmd.Env = os.Environ()
+		if hc.settings.KubeConfig != "" {
+			cmd.Env = append(cmd.Env, "KUBECONFIG="+hc.settings.KubeConfig)
+		}
+
+		if output, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("Warning: Error updating Helm repositories via Helm CLI: %v\nOutput: %s", err, string(output))
+			// Do not return error here, as it might be a transient issue for one repo.
+			// The application can often proceed.
+		} else {
+			log.Println("Helm repositories updated successfully via Helm CLI.")
+		}
 	}
-	log.Println("Helm repositories updated successfully.")
 	return nil
 }
 
 // InstallChart installs a Helm chart.
-// Takes helm.ChartDefinition now.
-func (hc *HelmClient) InstallChart(chartDef ChartDefinition, releaseName string, values map[string]interface{}) (*release.Release, error) { // MODIFIED PARAMETER TYPE
+func (hc *HelmClient) InstallChart(chartDef ChartDefinition, releaseName string, values map[string]interface{}) (*release.Release, error) {
 	if releaseName == "" {
 		releaseName = chartDef.Name
 	}
@@ -154,23 +190,28 @@ func (hc *HelmClient) InstallChart(chartDef ChartDefinition, releaseName string,
 	}
 
 	client := action.NewInstall(hc.actionConfig)
-	client.Namespace = hc.config.AppInstallNamespace
+	client.Namespace = hc.config.AppInstallNamespace // Target namespace for chart resources
 	client.ReleaseName = releaseName
 	client.Version = chartDef.Version
 	client.Wait = true
 	client.Timeout = hc.config.HelmTimeout
 
+	// Use hc.settings for LocateChart as it contains repository configurations
 	chartPathOptions := client.ChartPathOptions
-	chartPathOptions.Version = chartDef.Version
+	chartPathOptions.Version = chartDef.Version // Ensure version is set for locating
+	// Set settings for ChartPathOptions to use repository config
+	// This is crucial for LocateChart to find charts in repositories.
+	// client.ChartPathOptions.SetEnvSettings(hc.settings) // This method doesn't exist.
+	// Instead, LocateChart itself takes settings.
 
 	log.Printf("Locating chart '%s' version '%s'...", chartDef.Chart, chartDef.Version)
-	cp, err := chartPathOptions.LocateChart(chartDef.Chart, hc.settings)
+	cp, err := chartPathOptions.LocateChart(chartDef.Chart, hc.settings) // Pass hc.settings here
 	if err != nil {
 		log.Printf("Error locating chart %s (version %s): %v. Attempting repo update before retry.", chartDef.Chart, client.Version, err)
-		if errUpdate := hc.UpdateRepos([]ChartDefinition{chartDef}); errUpdate != nil { // Update only the relevant repo
+		if errUpdate := hc.UpdateRepos([]ChartDefinition{chartDef}); errUpdate != nil {
 			log.Printf("Repo update failed during chart location for %s: %v", chartDef.Chart, errUpdate)
 		}
-		cp, err = chartPathOptions.LocateChart(chartDef.Chart, hc.settings)
+		cp, err = chartPathOptions.LocateChart(chartDef.Chart, hc.settings) // Retry
 		if err != nil {
 			return nil, fmt.Errorf("could not locate chart '%s' (version '%s') after repo update: %w", chartDef.Chart, chartDef.Version, err)
 		}
@@ -195,7 +236,6 @@ func (hc *HelmClient) InstallChart(chartDef ChartDefinition, releaseName string,
 // ListInstalledReleases lists all releases in the configured namespace.
 func (hc *HelmClient) ListInstalledReleases() ([]ReleaseInfo, error) {
 	listClient := action.NewList(hc.actionConfig)
-	listClient.AllNamespaces = false
 	listClient.SetStateMask()
 
 	results, err := listClient.Run()
@@ -276,6 +316,10 @@ func (hc *HelmClient) UninstallRelease(releaseName string) (*release.UninstallRe
 // GetReleaseStatus retrieves the status of a specific release.
 func (hc *HelmClient) GetReleaseStatus(releaseName string) (map[string]interface{}, error) {
 	cmd := exec.Command("helm", "status", releaseName, "-n", hc.config.AppInstallNamespace, "-o", "json")
+	cmd.Env = os.Environ()
+	if hc.settings.KubeConfig != "" {
+		cmd.Env = append(cmd.Env, "KUBECONFIG="+hc.settings.KubeConfig)
+	}
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
