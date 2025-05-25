@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/Ekonum/app-store-api/compare/v1.0.0...v1.0.1) (2025-05-25)
+
+
+### Bug Fixes
+
+* **helm:** 🔧 restructure Helm client and improve config handling ([68fe1a9](https://github.com/Ekonum/app-store-api/commit/68fe1a931fe137671f5fd50beff4dc35bc4637c7))
+
 # 1.0.0 (2025-05-20)
 
 
