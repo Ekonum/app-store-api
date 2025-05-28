@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/Ekonum/app-store-api/compare/v1.0.1...v1.1.0) (2025-05-28)
+
+
+### Features
+
+* **metrics:** 📊 add metrics streaming and handling ([a319adb](https://github.com/Ekonum/app-store-api/commit/a319adb3b82a539a49ea2e548dcf22d809391c9c))
+
 ## [1.0.1](https://github.com/Ekonum/app-store-api/compare/v1.0.0...v1.0.1) (2025-05-25)
 
 
