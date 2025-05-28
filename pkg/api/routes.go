@@ -26,7 +26,9 @@ func SetupRouter(handler *APIHandler) *gin.Engine {
 		apiGroup.GET("/releases", handler.ListReleasesHandler)
 		apiGroup.GET("/releases/:releaseName/status", handler.GetReleaseStatusHandler)
 		apiGroup.DELETE("/releases/:releaseName", handler.UninstallReleaseHandler)
-	}
 
+		// Metrics streaming endpoint
+		apiGroup.GET("/metrics/stream", handler.MetricsStreamHandler)
+	}
 	return router
 }

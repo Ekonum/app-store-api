@@ -19,9 +19,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions" // Needed for ConfigFlags
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"app-store-api/pkg/config"
@@ -37,81 +34,45 @@ type HelmClient struct {
 }
 
 // NewHelmClient creates a new HelmClient.
-func NewHelmClient(cfg *config.AppConfig) (*HelmClient, error) {
-	settings := cli.New() // Keep settings for non-REST client specific configs like cache paths
-	// Note: settings.Namespace() will be the namespace from the current kubeconfig context or "default"
-	// We will override this for Helm operations to use cfg.AppInstallNamespace.
+func NewHelmClient(cfg *config.AppConfig, kubeClientset kubernetes.Interface) (*HelmClient, error) {
+	settings := cli.New()
+	settings.SetNamespace(cfg.AppInstallNamespace)
 
 	actionCfg := new(action.Configuration)
-	var k8sConfig *rest.Config // This will be used for the direct Kubernetes client
-	var err error
 
-	// Setup ConfigFlags for Helm's RESTClientGetter
-	// These flags will determine how Helm connects to Kubernetes.
-	// The namespace in ConfigFlags is the default namespace for operations if not overridden.
-	// For Helm, the namespace for release metadata storage is cfg.AppInstallNamespace.
 	configFlags := genericclioptions.NewConfigFlags(true).WithDeprecatedPasswordFlag()
-	configFlags.Namespace = &cfg.AppInstallNamespace // Helm operations default to this namespace
+	configFlags.Namespace = &cfg.AppInstallNamespace
 
-	// Determine if running in-cluster or using a kubeconfig file
 	inCluster := os.Getenv("KUBERNETES_SERVICE_HOST") != "" && os.Getenv("KUBERNETES_SERVICE_PORT") != ""
-
-	if inCluster {
-		log.Println("Detected in-cluster environment. Using in-cluster config for Helm and Kubernetes clients.")
-		// For in-cluster, KubeConfigPath should be empty for ConfigFlags to use service account
-		// BearerToken and CAFile might be auto-populated or can be set from service account paths if needed.
-		// ConfigFlags defaults to in-cluster if KubeConfig is not set.
-		k8sConfig, err = rest.InClusterConfig()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get in-cluster Kubernetes config for kubeClient: %w", err)
-		}
-	} else {
-		log.Printf("Not an in-cluster environment. Using kubeconfig from: %s", cfg.KubeconfigPath)
+	if !inCluster {
 		if cfg.KubeconfigPath == "" {
 			return nil, fmt.Errorf("kubeconfig path is not set for out-of-cluster configuration")
 		}
-		configFlags.KubeConfig = &cfg.KubeconfigPath // Point to the kubeconfig file
-		// The namespace in configFlags will be used as the default if not overridden per operation
-		// For Helm actions, we explicitly set the namespace (cfg.AppInstallNamespace) where needed.
-
-		k8sConfig, err = clientcmd.BuildConfigFromFlags("", cfg.KubeconfigPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get Kubernetes config from file %s for kubeClient: %w", cfg.KubeconfigPath, err)
-		}
+		configFlags.KubeConfig = &cfg.KubeconfigPath
+		settings.KubeConfig = cfg.KubeconfigPath // Also for CLI settings if used directly
 	}
+	// If in-cluster, configFlags with empty KubeConfig path will use in-cluster mechanisms.
 
-	// Initialize Helm action configuration using the ConfigFlags as the RESTClientGetter
-	// The namespace passed to Init (second arg) is where Helm stores release metadata.
-	err = actionCfg.Init(configFlags, cfg.AppInstallNamespace, cfg.HelmDriver, log.Printf)
+	err := actionCfg.Init(configFlags, cfg.AppInstallNamespace, cfg.HelmDriver, log.Printf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize Helm action configuration: %w", err)
 	}
 
-	// Initialize direct Kubernetes client
-	kubeClient, err := kubernetes.NewForConfig(k8sConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Kubernetes client: %w", err)
-	}
-
-	// Apply the actual KubeConfig path to cli.EnvSettings for operations like `helm repo` that might use it
-	settings.KubeConfig = cfg.KubeconfigPath
-	settings.SetNamespace(cfg.AppInstallNamespace) // Ensure settings reflect the target namespace for CLI tools if used
-
 	hc := &HelmClient{
 		config:       cfg,
-		settings:     settings, // Retain settings for other uses like RepositoryCache
+		settings:     settings,
 		actionConfig: actionCfg,
-		kubeClient:   kubeClient,
+		kubeClient:   kubeClientset, // Use the passed clientset
 	}
 
+	// Namespace check (optional, good to have)
 	if _, errNs := hc.kubeClient.CoreV1().Namespaces().Get(context.Background(), cfg.AppInstallNamespace, metav1.GetOptions{}); errNs != nil {
 		if strings.Contains(errNs.Error(), "not found") {
-			log.Printf("Target application namespace %s not found. The application will attempt to install charts there.", cfg.AppInstallNamespace)
+			log.Printf("Target application namespace %s not found. Please ensure it exists.", cfg.AppInstallNamespace)
 		} else {
 			log.Printf("Error checking namespace %s: %v", cfg.AppInstallNamespace, errNs)
 		}
 	}
-
 	return hc, nil
 }
 

@@ -1,21 +1,36 @@
 charts:
   - name: "nginx"
     chart: "bitnami/nginx"
-    version: "15.14.0" # Pin version for stability
+    version: "15.14.0" # Version populaire et stable
     repo_url: "https://charts.bitnami.com/bitnami"
-    description: "A popular web server and reverse proxy."
-  - name: "redis"
+    description: "A popular web server and reverse proxy. Good for testing."
+
+  - name: "gitea"
+    chart: "gitea/gitea" # Le dépôt s'appellera 'gitea' lors de l'ajout
+    version: "10.3.0" # Vérifiez la dernière version stable sur Artifact Hub ou le dépôt Gitea
+    repo_url: "https://dl.gitea.io/charts/"
+    description: "Gitea: A painless self-hosted Git service. Uses SQLite by default."
+
+  - name: "vaultwarden"
+    chart: "pascaliske/vaultwarden" # Le dépôt s'appellera 'pascaliske'
+    version: "2.19.0" # Vérifiez la dernière version stable sur Artifact Hub pour ce chart
+    repo_url: "https://charts.pascaliske.dev"
+    description: "Lightweight, self-hosted Bitwarden server. Uses SQLite by default."
+
+  - name: "drawio"
+    chart: "pascaliske/drawio" # Le dépôt s'appellera 'pascaliske'
+    version: "2.4.2" # Vérifiez la dernière version stable
+    repo_url: "https://charts.pascaliske.dev"
+    description: "Self-hosted diagrams.net (draw.io) instance."
+
+  - name: "redis-bitnami"
     chart: "bitnami/redis"
     version: "18.10.1"
     repo_url: "https://charts.bitnami.com/bitnami"
-    description: "In-memory data structure store."
-  - name: "wordpress"
+    description: "In-memory data structure store (Bitnami). May require PVC."
+
+  - name: "wordpress-bitnami"
     chart: "bitnami/wordpress"
     version: "20.2.1"
     repo_url: "https://charts.bitnami.com/bitnami"
-    description: "The world's most popular blogging platform."
-    # Example of default values that could be applied if not overridden by user
-    # default_values:
-    #   service:
-    #     type: NodePort
-    #   wordpressUsername: admin
+    description: "The world's most popular blogging platform (Bitnami). May require PVC."
