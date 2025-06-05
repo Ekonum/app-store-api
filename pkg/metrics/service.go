@@ -28,22 +28,30 @@ func NewService(kc kubernetes.Interface, mc metricsv1beta1.Interface) *Service {
 
 // GetClusterMetricsSnapshot fetches a snapshot of current cluster, node, and pod metrics.
 func (s *Service) GetClusterMetricsSnapshot() (*ClusterMetrics, error) {
+	startTime := time.Now() // Log start time
 	if s.metricsClient == nil {
 		return nil, fmt.Errorf("metrics client not initialized, ensure Metrics Server is installed and API has permissions")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
+	log.Println("Fetching node metrics from Metrics Server...")
 	nodeMetricsList, err := s.metricsClient.MetricsV1beta1().NodeMetricses().List(ctx, metav1.ListOptions{})
 	if err != nil {
+		log.Printf("Error fetching node metrics: %v (took %v)", err, time.Since(startTime))
 		return nil, fmt.Errorf("failed to list node metrics: %w", err)
 	}
+	log.Printf("Fetched %d node metrics (took %v)", len(nodeMetricsList.Items), time.Since(startTime))
 
-	nodes, err := s.kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	log.Println("Fetching node list from Kubernetes API...")
+	nodesListStartTime := time.Now()
+	nodes, err := s.kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{}) // Use the same context
 	if err != nil {
+		log.Printf("Error fetching node list: %v (total time for metrics: %v)", err, time.Since(startTime))
 		return nil, fmt.Errorf("failed to list nodes: %w", err)
 	}
+	log.Printf("Fetched %d nodes from API (node list took %v, total metrics time so far: %v)", len(nodes.Items), time.Since(nodesListStartTime), time.Since(startTime))
 
 	var detailedNodeMetrics []NodeMetrics
 	var totalCPUUsageMilliCores, totalCPUCapacityMilliCores int64
@@ -109,6 +117,7 @@ func (s *Service) GetClusterMetricsSnapshot() (*ClusterMetrics, error) {
 		avgMemUsage = float64(totalMemUsageBytes*100) / float64(totalMemCapacityBytes)
 	}
 
+	log.Printf("Cluster metrics snapshot calculation completed (total time: %v)", time.Since(startTime))
 	return &ClusterMetrics{
 		TotalCPUUsageMilliCores:    totalCPUUsageMilliCores,
 		TotalCPUCapacityMilliCores: totalCPUCapacityMilliCores,

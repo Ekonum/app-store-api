@@ -2,18 +2,16 @@ package appcatalog
 
 import (
 	"fmt"
-	"log" // Consider structured logging
+	"log"
 
-	"app-store-api/pkg/helm" // Local import
+	"app-store-api/pkg/helm"
 )
 
-// Service provides operations for the application catalog.
 type Service struct {
 	charts     []ChartMeta
 	helmClient *helm.HelmClient
 }
 
-// NewService creates a new catalog service.
 func NewService(chartConfigPath string, hc *helm.HelmClient) (*Service, error) {
 	charts, err := LoadChartRegistryFromFile(chartConfigPath)
 	if err != nil {
@@ -21,7 +19,7 @@ func NewService(chartConfigPath string, hc *helm.HelmClient) (*Service, error) {
 	}
 	log.Printf("Loaded %d chart configurations from %s", len(charts), chartConfigPath)
 
-	// Convert appcatalog.ChartMeta to helm.ChartDefinition for UpdateRepos
+	// Convert appcatalog.ChartMeta to helm.ChartDefinition
 	helmChartDefinitions := make([]helm.ChartDefinition, len(charts))
 	for i, cm := range charts {
 		helmChartDefinitions[i] = helm.ChartDefinition{
@@ -32,9 +30,15 @@ func NewService(chartConfigPath string, hc *helm.HelmClient) (*Service, error) {
 		}
 	}
 
-	if err := hc.UpdateRepos(helmChartDefinitions); err != nil { // PASSING CONVERTED TYPE
-		log.Printf("Warning: Initial Helm repo update failed: %v", err)
-	}
+	// Run initial repo update in a separate goroutine so it doesn't block startup
+	go func() {
+		log.Println("Starting initial Helm repo update in background...")
+		if err := hc.UpdateRepos(helmChartDefinitions); err != nil {
+			log.Printf("Warning: Initial background Helm repo update failed: %v", err)
+		} else {
+			log.Println("Initial background Helm repo update completed.")
+		}
+	}()
 
 	return &Service{
 		charts:     charts,
@@ -42,12 +46,10 @@ func NewService(chartConfigPath string, hc *helm.HelmClient) (*Service, error) {
 	}, nil
 }
 
-// GetAvailableCharts returns the list of charts available for installation.
 func (s *Service) GetAvailableCharts() []ChartMeta {
 	return s.charts
 }
 
-// GetChartByName returns a chart's metadata by its simple name.
 func (s *Service) GetChartByName(name string) (*ChartMeta, error) {
 	for _, chart := range s.charts {
 		if chart.Name == name {

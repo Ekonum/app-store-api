@@ -138,7 +138,7 @@ func (h *APIHandler) MetricsStreamHandler(c *gin.Context) {
 
 	// Goroutine to periodically fetch and send metrics
 	go func() {
-		ticker := time.NewTicker(5 * time.Second) // Send updates every 5 seconds
+		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 
 		for {
@@ -176,8 +176,11 @@ func (h *APIHandler) MetricsStreamHandler(c *gin.Context) {
 	// Use io.WriteString for simpler SSE formatting
 	c.Stream(func(w io.Writer) bool {
 		if msg, ok := <-messageChan; ok {
-			fmt.Fprintf(w, "data: %s\n\n", msg) // SSE format: "data: <json_string>\n\n"
-			return true                         // Keep connection open
+			_, err := fmt.Fprintf(w, "data: %s\n\n", msg)
+			if err != nil {
+				return false
+			} // SSE format: "data: <json_string>\n\n"
+			return true // Keep connection open
 		}
 		return false // Close connection if channel is closed
 	})
