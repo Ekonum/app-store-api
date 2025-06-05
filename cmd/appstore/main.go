@@ -83,8 +83,7 @@ func main() {
 	// Start server
 	listenAddr := fmt.Sprintf(":%s", cfg.ListenPort)
 	log.Printf("API server starting on %s in %s mode", listenAddr, cfg.GinMode)
-	if err := router.Run(listenAddr); err != nil {
-		log.Fatalf("Failed to run server: %v", err)
-		os.Exit(1)
-	}
+       if err := router.Run(listenAddr); err != nil {
+               log.Fatalf("Failed to run server: %v", err)
+       }
 }
