@@ -138,5 +138,4 @@ kubectl apply -f k8s/03-service.yaml
 
 ## Contributing
 
-Please follow Conventional Commits specification for commit messages to enable automated versioning and changelog
-generation.
+Please follow Conventional Commits specification for commit messages to enable automated versioning and changelog generation.
