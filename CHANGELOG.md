@@ -1,3 +1,10 @@
+## [1.1.1](https://github.com/Ekonum/app-store-api/compare/v1.1.0...v1.1.1) (2025-06-05)
+
+
+### Bug Fixes
+
+* **metrics:** ♻️ update intervals and enhance logging ([fc35022](https://github.com/Ekonum/app-store-api/commit/fc35022936434975914a5476d4d70e0d1ddf9edc))
+
 # [1.1.0](https://github.com/Ekonum/app-store-api/compare/v1.0.1...v1.1.0) (2025-05-28)
 
 
