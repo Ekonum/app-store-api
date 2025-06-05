@@ -48,8 +48,7 @@ The application is configured via environment variables. See `pkg/config/config.
 - `HELM_TIMEOUT_SECONDS`: Timeout for Helm operations (default: `300`).
 - `CHART_CONFIG_PATH`: Path to the chart catalog definition file (default: `charts.yaml`).
 
-The `charts.yaml` file at the root (or specified by `CHART_CONFIG_PATH`) defines the applications available in the
-store.
+The `charts.yaml` file at the root (or specified by `CHART_CONFIG_PATH`) defines the applications available in the store.
 
 ## Getting Started
 
